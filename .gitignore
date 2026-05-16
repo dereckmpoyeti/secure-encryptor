@@ -1,0 +1,55 @@
+# Environnement virtuel
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Fichiers sensibles - IMPORTANT !
+password.hash
+*.hash
+
+# Coffre / fichiers generes par l'application
+CRYPTEUR/
+**/CRYPTEUR/
+device.id
+key.vault
+meta.json
+attempts.lock
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+**/logs/
+
+# Fichiers temporaires
+*.tmp
+*.tmp.*
+*.bak
+*~
