@@ -6,11 +6,12 @@ import base64
 import getpass
 import os
 import subprocess
+import sys
 
 from colorama import Fore
 
 from config import (
-    PIN_LENGTH,
+    PIN_LENGTH, MAX_PIN_ATTEMPTS,
     KEY_VAULT_FILE, DEVICE_ID_FILE,
 )
 from crypto import derive_master_key, aes_gcm_encrypt, aes_gcm_decrypt
@@ -21,14 +22,11 @@ from display import (
 )
 from vault import (
     is_usb_initialized, read_usb_files, write_vault_files,
-    usb_folder_path,
+    usb_folder_path, ensure_folder_hidden,
+    read_attempts, write_attempts, reset_attempts, is_locked, destroy_key_vault,
 )
 
-try:
-    import ctypes
-    WINDOWS = True
-except ImportError:
-    WINDOWS = False
+WINDOWS = sys.platform == "win32"
 
 
 # ── Détection USB ─────────────────────────────────────────────────────────────
@@ -114,6 +112,7 @@ def get_usb_uuid(drive_letter: str) -> str:
             pass
 
         try:
+            import ctypes
             serial = ctypes.c_ulong(0)
             ret = ctypes.windll.kernel32.GetVolumeInformationW(
                 letter + "\\", None, 0, ctypes.byref(serial),
@@ -130,9 +129,6 @@ def get_usb_uuid(drive_letter: str) -> str:
 def select_usb_drive() -> str | None:
     """
     Détecte les USB disponibles et demande à l'utilisateur de choisir.
-    - Si une seule USB : demande confirmation avant de la sélectionner.
-    - Si plusieurs USB : affiche la liste et demande un choix.
-    - Si aucune USB : retourne None.
     Retourne le chemin racine du lecteur (ex: 'E:\\').
     """
     drives = get_usb_drives()
@@ -150,21 +146,30 @@ def select_usb_drive() -> str | None:
         print_info(f"Clé USB détectée : {label}")
         rep = input(f"{Fore.CYAN}Utiliser cette clé ? (O/n) :{Fore.WHITE} >> ").strip().lower()
         if rep in ("", "o", "oui", "y", "yes"):
-            return d["letter"] + "\\"
-        print_warning("Opération annulée.")
-        return None
+            drive = d["letter"] + "\\"
+        else:
+            print_warning("Opération annulée.")
+            return None
+    else:
+        # Cas : plusieurs USB → liste
+        print(f"\n{Fore.CYAN}Clés USB disponibles :{Fore.WHITE}")
+        for i, d in enumerate(drives, 1):
+            uuid_str = f"  (série: {d['uuid']})" if d["uuid"] else ""
+            print(f"  {i}. {d['letter']} — {d['label']}{uuid_str}")
 
-    # Cas : plusieurs USB → liste
-    print(f"\n{Fore.CYAN}Clés USB disponibles :{Fore.WHITE}")
-    for i, d in enumerate(drives, 1):
-        uuid_str = f"  (série: {d['uuid']})" if d["uuid"] else ""
-        print(f"  {i}. {d['letter']} — {d['label']}{uuid_str}")
+        while True:
+            rep = input(f"{Fore.CYAN}Votre choix (1-{len(drives)}) :{Fore.WHITE} >> ").strip()
+            if rep.isdigit() and 1 <= int(rep) <= len(drives):
+                drive = drives[int(rep) - 1]["letter"] + "\\"
+                break
+            print_error("Choix invalide.")
 
-    while True:
-        rep = input(f"{Fore.CYAN}Votre choix (1-{len(drives)}) :{Fore.WHITE} >> ").strip()
-        if rep.isdigit() and 1 <= int(rep) <= len(drives):
-            return drives[int(rep) - 1]["letter"] + "\\"
-        print_error("Choix invalide.")
+    # Re-appliquer le masquage à chaque connexion (attribut peut être perdu
+    # après un scandisk ou une manipulation manuelle)
+    if is_usb_initialized(drive):
+        ensure_folder_hidden(drive)
+
+    return drive
 
 
 # ── Validation du PIN ─────────────────────────────────────────────────────────
@@ -179,9 +184,7 @@ def validate_pin(pin: str) -> tuple[bool, str]:
 
 def ask_pin(label: str = "PIN") -> str | None:
     """
-    Demande le PIN de façon sécurisée.
-    Utilise msvcrt sur Windows (compatible PowerShell/CMD)
-    et getpass sur Linux/macOS.
+    Demande le PIN de façon sécurisée (caractères masqués).
     Retourne None si l'utilisateur annule avec Ctrl+C.
     """
     prompt = f"{Fore.CYAN}{label} ({PIN_LENGTH} chiffres) : {Fore.WHITE}"
@@ -193,7 +196,7 @@ def ask_pin(label: str = "PIN") -> str | None:
         try:
             while True:
                 ch = msvcrt.getwch()
-                if ch in ("\r", "\n"):   # Entrée
+                if ch in ("\r", "\n"):
                     print()
                     break
                 if ch == "\x03":          # Ctrl+C
@@ -229,7 +232,7 @@ def initialize_usb(drive_root: str) -> bool:
     - Génère une clé AES-256 totalement aléatoire
     - Demande un PIN à 8 chiffres (confirmé deux fois)
     - Chiffre la clé AES avec scrypt(PIN + UUID + device_id)
-    - Écrit CRYPTEUR/ sur la USB
+    - Écrit CRYPTEUR/ sur la USB (caché sur Windows)
     Retourne True si succès, False si annulé.
     """
     print_separator()
@@ -279,6 +282,7 @@ def initialize_usb(drive_root: str) -> bool:
         "key_encrypted":  base64.b64encode(encrypted).decode("ascii"),
     }
 
+    # write_vault_files crée aussi attempts.lock, logs/ et masque le dossier
     write_vault_files(drive_root, device_id, key_vault)
 
     print_success("Clé USB configurée avec succès !")
@@ -292,10 +296,11 @@ def initialize_usb(drive_root: str) -> bool:
 def unlock_usb_key(drive_root: str) -> bytes | None:
     """
     Déverrouille la clé USB :
-    1. Demande le PIN
-    2. Dérive la clé maître et déchiffre key.vault
-    3. Succès → retourne la clé AES
-    4. PIN incorrect → redemande indéfiniment (q pour quitter)
+    1. Vérifie si la clé est déjà verrouillée (≥ MAX_PIN_ATTEMPTS tentatives)
+    2. Demande le PIN
+    3. Incrémente le compteur avant chaque tentative
+    4. Succès → remet le compteur à 0, retourne la clé AES
+    5. Échec → compteur incrémenté, verrouillage si limite atteinte
     """
     try:
         usb_data = read_usb_files(drive_root)
@@ -306,39 +311,97 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
     device_id      = usb_data["device_id"]
     key_vault      = usb_data["key_vault"]
     uuid_partition = key_vault["uuid_partition"]
+
+    # ── Vérification du verrou ────────────────────────────────────────────────
+    if is_locked(drive_root, device_id):
+        _print_locked_message()
+        return None
+
     print_separator()
     print_info("Déverrouillez la clé USB avec votre PIN.")
+
+    attempts = read_attempts(drive_root, device_id)
+    remaining = MAX_PIN_ATTEMPTS - attempts
+    if attempts > 0:
+        print_warning(
+            f"Attention : {attempts} tentative(s) échouée(s). "
+            f"Il vous reste {remaining} essai(s) avant verrouillage définitif."
+        )
+
     typewriter("(tapez 'q' pour annuler)", color=Fore.YELLOW)
 
     while True:
+        # Revérifier le verrou à chaque itération (sécurité défensive)
+        current = read_attempts(drive_root, device_id)
+        if current >= MAX_PIN_ATTEMPTS:
+            _print_locked_message()
+            return None
+
         pin = ask_pin("PIN")
 
-        # Annulation explicite (q) ou Ctrl+C
+        # Annulation explicite (ne consomme pas de tentative)
         if pin is None or pin.lower() == "q":
             print_warning("Annulé.")
             return None
 
-        # Erreur de format → on redemande sans consommer de tentative
+        # ── Incrémenter le compteur AVANT toute vérification ─────────────────
+        # Toute saisie non annulée (format invalide ou PIN incorrect) consomme
+        # une tentative — un attaquant ne peut pas tâtonner sur la longueur
+        # sans déclencher le verrou.
+        new_count = current + 1
+        write_attempts(drive_root, device_id, new_count)
+
+        # Erreur de format : compter la tentative mais informer l'utilisateur
         ok, err = validate_pin(pin)
         if not ok:
-            print_error(err)
+            remaining_after = MAX_PIN_ATTEMPTS - new_count
+            if remaining_after <= 0:
+                destroy_key_vault(drive_root)
+                _print_locked_message()
+                return None
+            print_error(f"{err} ({remaining_after} tentative(s) restante(s))")
             continue
 
-        # Tentative de déchiffrement
         try:
             master_key    = derive_master_key(pin, uuid_partition, device_id)
             encrypted_aes = base64.b64decode(key_vault["key_encrypted"])
             aes_key       = aes_gcm_decrypt(encrypted_aes, master_key)
 
+            # ── Succès : remettre le compteur à 0 ────────────────────────────
+            reset_attempts(drive_root, device_id)
             print_success("Clé USB déverrouillée.")
             return aes_key
 
         except InvalidTag:
-            print_error("PIN incorrect, réessayez.")
+            remaining_after = MAX_PIN_ATTEMPTS - new_count
+            if remaining_after <= 0:
+                destroy_key_vault(drive_root)
+                _print_locked_message()
+                return None
+            else:
+                print_error(
+                    f"PIN incorrect. "
+                    f"{remaining_after} tentative(s) restante(s) avant verrouillage."
+                )
 
         except Exception as e:
             print_error(f"Erreur inattendue : {e}")
             return None
+
+
+def _print_locked_message():
+    """Affiche le message de verrouillage définitif."""
+    print_error(
+        f"Clé USB verrouillée après {MAX_PIN_ATTEMPTS} tentatives incorrectes."
+    )
+    typewriter(
+        "Cette clé USB est définitivement verrouillée.",
+        color=Fore.RED,
+    )
+    typewriter(
+        "Les données chiffrées avec cette clé sont inaccessibles.",
+        color=Fore.RED,
+    )
 
 
 # ── Statut ────────────────────────────────────────────────────────────────────
@@ -359,12 +422,18 @@ def get_usb_status(drive_root: str) -> dict | None:
         print_error(str(e))
         return None
 
+    device_id      = usb_data["device_id"]
     key_vault      = usb_data["key_vault"]
     meta           = usb_data["meta"]
     uuid_partition = key_vault["uuid_partition"]
+    attempts       = read_attempts(drive_root, device_id)
+    locked         = attempts >= MAX_PIN_ATTEMPTS
 
     return {
         "drive":          drive_root,
         "uuid_partition": uuid_partition,
         "created_at":     meta.get("created_at", "N/A"),
+        "attempts":       attempts,
+        "max_attempts":   MAX_PIN_ATTEMPTS,
+        "locked":         locked,
     }

@@ -123,12 +123,22 @@ Journal        : {stats.get('log_path', 'N/A')}
 
 def display_usb_status(info: dict):
     """Affiche l'état de la clé USB."""
+    locked      = info.get("locked", False)
+    attempts    = info.get("attempts", 0)
+    max_att     = info.get("max_attempts", 5)
+    lock_status = (
+        f"{Fore.RED}VERROUILLÉE{Style.RESET_ALL}"
+        if locked
+        else f"{Fore.GREEN}Déverrouillée{Style.RESET_ALL}"
+    )
     print(f"""
 {Fore.GREEN}STATUT DE LA CLÉ USB{Style.RESET_ALL}
 {Fore.BLUE}{'-' * 50}{Style.RESET_ALL}
 Lecteur        : {info.get('drive', 'N/A')}
 UUID partition : {info.get('uuid_partition', 'N/A')}
 Créée le       : {info.get('created_at', 'N/A')}
+Statut         : {lock_status}
+Tentatives     : {attempts} / {max_att}
 """)
 
 

@@ -1,34 +1,47 @@
-# Crypteur Securise v3
+# Crypteur Sécurisé v3
 
-Outil en ligne de commande pour chiffrer et dechiffrer recursivement les fichiers d'un dossier avec AES-256-GCM. L'acces aux donnees repose sur une cle USB physique et un PIN a 8 chiffres.
+Outil en ligne de commande pour chiffrer et déchiffrer récursivement les fichiers d'un dossier avec AES-256-GCM. L'accès aux données repose sur une clé USB physique et un PIN à 8 chiffres. Après 5 tentatives de PIN incorrectes, la clé AES est détruite de façon irréversible.
 
 ![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Encryption](https://img.shields.io/badge/encryption-AES--256--GCM-red)
 ![Auth](https://img.shields.io/badge/auth-USB%20%2B%20PIN-orange)
 
-## Fonctionnalites
+---
 
-- Interface en ligne de commande avec `--encrypt`, `--decrypt`, `--status` et `--help`.
-- Detection de cle USB avec `psutil`.
-- Initialisation automatique d'une cle USB non configuree lors du premier chiffrement.
-- Generation d'une cle AES-256 aleatoire, stockee chiffree dans `CRYPTEUR/key.vault`.
-- Protection de `key.vault` par une cle derivee avec `scrypt` depuis le PIN, l'UUID de partition et un `device.id`.
-- Chiffrement et dechiffrement recursifs de dossiers.
-- AES-GCM avec verification d'integrite.
-- Sel et IV uniques par fichier.
-- Traitement par blocs pour limiter l'utilisation memoire.
-- Fichiers temporaires `*.tmp` avant remplacement final.
-- Nettoyage des fichiers `*.tmp` orphelins avant traitement.
-- Rapports JSON horodates avec statistiques et erreurs.
+## Fonctionnalités
 
-## Prerequis
+**Chiffrement**
+- Chiffrement et déchiffrement récursifs de dossiers avec AES-256-GCM.
+- Sel et IV uniques par fichier — deux fichiers identiques produisent des chiffrés différents.
+- Sous-clé unique par fichier dérivée depuis la clé AES de la USB.
+- Traitement par blocs de 1 Mo pour limiter l'utilisation mémoire sur les gros fichiers.
+- Effacement sécurisé du fichier source après chiffrement (écrasement aléatoire avant suppression).
+- Fichiers temporaires `*.tmp` avant remplacement atomique — pas de fichier à moitié écrit en cas de coupure.
+- Nettoyage automatique des `*.tmp` orphelins avant chaque traitement.
 
-- Python 3.12 ou superieur
-- Une cle USB disponible
-- Espace disque suffisant pour creer les fichiers temporaires
+**Authentification**
+- Clé USB physique obligatoire + PIN à 8 chiffres.
+- Le PIN n'est jamais stocké — il sert uniquement à dériver la clé maître.
+- Initialisation automatique d'une clé USB vierge au premier chiffrement.
+- Dossier `CRYPTEUR/` caché sur Windows (attributs Système + Caché).
+- Verrouillage définitif après 5 tentatives de PIN incorrectes (format invalide inclus).
+- À la 5ème tentative échouée : destruction cryptographique irréversible de `key.vault` (3 passes aléatoires + suppression).
 
-Dependances Python :
+**Rapports**
+- Rapports JSON horodatés écrits dans `CRYPTEUR/logs/` sur la clé USB.
+- Chaque rapport contient : dossier traité, opération, nombre de fichiers, succès, échecs, taille totale, débit moyen, durée, erreurs détaillées.
+- Barre de progression avec débit en temps réel (Mo/s).
+
+---
+
+## Prérequis
+
+- Python 3.12 ou supérieur
+- Une clé USB disponible
+- Espace disque suffisant pour les fichiers temporaires (taille du plus gros fichier à traiter)
+
+Dépendances Python :
 
 ```txt
 colorama==0.4.6
@@ -37,9 +50,11 @@ psutil==7.1.3
 tqdm==4.67.1
 ```
 
+---
+
 ## Installation
 
-Windows :
+**Windows :**
 
 ```powershell
 py -3.12 -m venv .venv
@@ -48,7 +63,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Linux/macOS :
+**Linux/macOS :**
 
 ```bash
 python3 -m venv .venv
@@ -57,127 +72,150 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Utilisation
+---
 
-Afficher l'aide :
+## Utilisation
 
 ```powershell
 python main.py --help
-```
-
-Chiffrer un dossier :
-
-```powershell
-python main.py --encrypt C:\chemin\vers\dossier
-```
-
-Dechiffrer un dossier :
-
-```powershell
-python main.py --decrypt C:\chemin\vers\dossier
-```
-
-Afficher le statut de la cle USB :
-
-```powershell
+python main.py --encrypt <dossier>
+python main.py --decrypt <dossier>
 python main.py --status
 ```
 
-Si le chemin contient des espaces, entourez-le avec des guillemets :
+Si le chemin contient des espaces, entourez-le de guillemets :
 
 ```powershell
-python main.py --encrypt "C:\Users\Dereck\Pictures\mon dossier"
+python main.py --encrypt "C:\Users\Alice\Documents\mon dossier"
 ```
 
-## Premier Usage
+---
 
-1. Lancez une commande de chiffrement avec `--encrypt`.
-2. Branchez la cle USB et appuyez sur Entree.
-3. Confirmez la cle detectee.
-4. Si la cle n'est pas encore configuree, le programme cree automatiquement le dossier `CRYPTEUR`.
-5. Definissez un PIN a exactement 8 chiffres.
-6. Le programme genere une cle AES aleatoire et la stocke chiffree dans `key.vault`.
-7. Le dossier cible est chiffre recursivement.
+## Premier usage
 
-## Structure Sur La Cle USB
+1. Lancez `--encrypt` sur le dossier à chiffrer.
+2. Branchez la clé USB et appuyez sur Entrée.
+3. Confirmez la clé détectée (ou choisissez parmi plusieurs).
+4. Si la clé n'est pas encore configurée, le programme crée automatiquement le dossier `CRYPTEUR/`.
+5. Définissez un PIN à exactement 8 chiffres (saisi deux fois pour confirmation).
+6. Le programme génère une clé AES-256 aléatoire, la chiffre et l'écrit dans `key.vault`.
+7. Le dossier cible est chiffré récursivement.
 
-Apres initialisation, la cle USB contient :
+> **Attention :** notez votre PIN et conservez la clé USB en lieu sûr. Il n'existe aucun mécanisme de récupération.
+
+---
+
+## Structure sur la clé USB
+
+Après initialisation, la clé USB contient le dossier `CRYPTEUR/` (caché sur Windows) :
 
 ```text
 CRYPTEUR/
-+-- device.id      # Identifiant aleatoire de 32 octets
-+-- key.vault      # Cle AES chiffree
-`-- meta.json      # Metadonnees de creation
+├── device.id       # Identifiant aléatoire de 32 octets lié à cette USB
+├── key.vault       # Clé AES-256 chiffrée par la clé maître
+├── attempts.lock   # Compteur de tentatives PIN signé HMAC-SHA256
+├── meta.json       # Métadonnées de création
+└── logs/           # Rapports JSON horodatés
+    ├── 20250517_143012_enc.json
+    └── 20250517_145501_dec.json
 ```
 
-Le PIN n'est pas stocke. Il sert a deriver une cle maitre permettant de dechiffrer `key.vault`.
+Le PIN n'est jamais stocké. Il sert à dériver la clé maître qui déchiffre `key.vault`.
 
-## Rapports
+---
 
-La V3 actuelle ecrit les rapports JSON dans le dossier local :
+## Verrouillage après tentatives échouées
+
+Le programme comptabilise **toute saisie non annulée** comme une tentative, y compris les PIN de longueur incorrecte. Le compteur est signé par HMAC-SHA256 avec le `device_id` de la USB — il ne peut pas être falsifié ou remis à zéro sans connaître ce `device_id`.
+
+À la 5ème tentative échouée :
+
+1. `key.vault` est écrasé avec 3 passes de données aléatoires (avec `fsync` entre chaque passe).
+2. `key.vault` est supprimé.
+3. `attempts.lock` est supprimé.
+
+**Les fichiers chiffrés avec cette USB sont alors définitivement inaccessibles**, même en connaissant le PIN ou en récupérant physiquement la clé USB.
+
+Le seuil de 5 tentatives est configurable dans `config.py` (`MAX_PIN_ATTEMPTS`).
+
+---
+
+## Format des fichiers chiffrés
 
 ```text
-logs/
+[9 octets]   Magic header : "ENCRYPTED"
+[1 octet]    Version du format
+[16 octets]  Sel scrypt (unique par fichier)
+[12 octets]  IV GCM (unique par fichier)
+[Variable]   Données chiffrées (AES-256-GCM)
+[16 octets]  Tag d'authentification GCM
 ```
 
-Chaque rapport contient notamment :
+Les fichiers chiffrés prennent l'extension `.encrypted`. Au déchiffrement, cette extension est retirée et le fichier `.encrypted` est effacé de façon sécurisée.
 
-- le dossier traite
-- l'operation
-- le nombre de fichiers
-- les succes et echecs
-- la taille totale
-- le debit moyen
-- la duree
-- les erreurs eventuelles
+---
 
-## Format Des Fichiers Chiffres
+## Structure du projet
 
 ```text
-[9 octets]  Header : ENCRYPTED
-[1 octet]   Version du format
-[16 octets] Sel scrypt
-[12 octets] IV GCM
-[Variable]  Donnees chiffrees
-[16 octets] Tag GCM
+├── main.py           # Point d'entrée CLI
+├── config.py         # Constantes et paramètres configurables
+├── crypto.py         # Dérivation de clés (scrypt), AES-256-GCM, HMAC-SHA256
+├── usb.py            # Détection, initialisation, déverrouillage et verrouillage USB
+├── vault.py          # Gestion de CRYPTEUR/ : lecture, écriture, verrou, destruction
+├── processor.py      # Chiffrement/déchiffrement de dossiers, rapports JSON
+├── display.py        # Affichage, couleurs, progression, statistiques
+├── requirements.txt  # Dépendances Python
+├── README.md         # Documentation
+└── LICENCE           # Licence MIT
 ```
 
-Les fichiers chiffres prennent l'extension `.encrypted`. Au dechiffrement, cette extension est retiree.
+---
 
-## Structure Du Projet
+## Sécurité
 
-```text
-V3/
-+-- main.py           # Point d'entree CLI
-+-- config.py         # Constantes du projet
-+-- crypto.py         # Derivation de cles, AES-GCM, HMAC
-+-- usb.py            # Detection, initialisation et deverrouillage USB
-+-- vault.py          # Lecture/ecriture du dossier CRYPTEUR
-+-- processor.py      # Chiffrement/dechiffrement de dossiers
-+-- display.py        # Affichage, couleurs et statistiques
-+-- requirements.txt  # Dependances Python
-+-- README.md         # Documentation
-`-- LICENCE           # Licence MIT
-```
+**Ce qui est garanti**
+- La clé AES est générée avec `os.urandom(32)` — jamais dérivée d'un mot de passe.
+- La clé maître est dérivée avec `scrypt(PIN + UUID_partition + device_id)` — aucun des trois éléments seuls ne suffit.
+- Chaque fichier utilise un sel unique et une sous-clé dérivée : deux fichiers identiques produisent des chiffrés différents.
+- AES-256-GCM garantit confidentialité et intégrité simultanément — toute altération du fichier est détectée.
+- Le compteur de tentatives est signé HMAC-SHA256 et lié physiquement au `device_id` de la USB.
+- La destruction de `key.vault` est effectuée par 3 passes d'écrasement aléatoire avec `fsync` avant suppression.
 
-## Securite
+**Limites connues**
 
-- La cle AES des fichiers est generee aleatoirement avec `os.urandom(32)`.
-- La cle AES est stockee chiffree dans `key.vault`.
-- La cle maitre est derivee avec `scrypt(PIN + UUID_partition + device_id)`.
-- Chaque fichier utilise un sel unique et une sous-cle derivee.
-- AES-GCM fournit confidentialite et verification d'integrite.
-- Une mauvaise cle ou un fichier corrompu declenche une erreur de tag GCM.
+*Effacement sécurisé et wear leveling :* sur les clés USB avec contrôleur intelligent, le wear leveling peut rediriger les écritures vers d'autres blocs physiques. Les 3 passes d'écrasement sont efficaces sur la grande majorité des clés USB grand public, mais un outil forensique spécialisé pourrait théoriquement récupérer des données sur un support haut de gamme. Cette limite est inhérente au support flash et ne peut pas être contournée en logiciel pur.
 
-Important : dans l'etat actuel du code, un PIN incorrect redemande une nouvelle saisie. Le blocage definitif apres 3 tentatives n'est pas implemente dans cette V3.
+*Mémoire Python :* le PIN et la clé AES transitent en clair dans la mémoire du processus Python pendant l'exécution. Ce risque est difficile à éliminer en Python pur.
 
-## Bonnes Pratiques
+*Verrouillage Linux/macOS :* le dossier `CRYPTEUR/` n'est pas masqué sur Linux et macOS (pas d'équivalent à `attrib +H +S` sans renommer le dossier, ce qui briserait la compatibilité).
 
-- Sauvegardez vos donnees avant un chiffrement massif.
-- Testez le dechiffrement sur un petit dossier avant un usage reel.
-- Gardez la cle USB dans un endroit sur.
-- Ne perdez pas le PIN : sans la cle USB et le PIN, les donnees sont inaccessibles.
-- N'interrompez pas le programme pendant une operation.
+---
+
+## Recommandations pour un usage haute sécurité
+
+Pour neutraliser la limite du wear leveling, la mesure complémentaire la plus efficace est de **chiffrer intégralement la clé USB au niveau du volume** :
+
+- **Windows :** activer BitLocker To Go sur la clé USB (clic droit → Activer BitLocker). Les données physiquement récupérées sur la NAND seront chiffrées au niveau volume, indépendamment du comportement du contrôleur.
+- **Linux :** formater la clé avec LUKS (`cryptsetup`).
+- **macOS :** utiliser un volume chiffré (`Finder → Chiffrer`).
+
+Avec cette combinaison — `key.vault` chiffré par scrypt + destruction en 3 passes + volume USB chiffré — la sécurité reste effective même face à un attaquant disposant d'outils forensiques et d'un accès physique à la clé USB.
+
+Pour les environnements à très haute exigence, des clés USB avec **chiffrement matériel certifié** (Kingston IronKey, Apricorn Aegis) intègrent un mécanisme de destruction hardware après N tentatives incorrectes, incontournable par logiciel.
+
+---
+
+## Bonnes pratiques
+
+- Sauvegardez vos données avant tout chiffrement massif.
+- Testez le déchiffrement sur un petit dossier avant un usage en production.
+- Ne lancez pas deux instances du programme simultanément sur le même dossier.
+- N'interrompez pas le programme pendant une opération (risque de fichiers `.tmp` orphelins, nettoyés automatiquement au prochain lancement).
+- Conservez la clé USB séparément de la machine qui héberge les fichiers chiffrés.
+- Le PIN ne doit être connu que de vous — il n'existe aucune procédure de récupération.
+
+---
 
 ## Licence
 

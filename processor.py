@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from config import (
     MAGIC, FORMAT_VERSION, SALT_SIZE, IV_SIZE,
-    TAG_SIZE, CHUNK_SIZE, LOGS_DIR,
+    TAG_SIZE, CHUNK_SIZE,
 )
 from crypto import derive_file_key
 from display import format_size, print_error, print_info, print_success, print_warning
@@ -248,7 +248,12 @@ def test_decryption_key(files: list[str], aes_key: bytes) -> bool:
 
 # ── Traitement de dossier ─────────────────────────────────────────────────────
 
-def process_folder(folder_path: str, aes_key: bytes, operation: str = "encrypt") -> dict:
+def process_folder(
+    folder_path: str,
+    aes_key: bytes,
+    operation: str = "encrypt",
+    logs_dir: str = "logs",
+) -> dict:
     """
     Parcourt récursivement un dossier et chiffre ou déchiffre chaque fichier.
     Affiche une barre de progression avec débit en Mo/s.
@@ -367,23 +372,23 @@ def process_folder(folder_path: str, aes_key: bytes, operation: str = "encrypt")
   Durée   : {stats['duration']}
 """)
 
-    # Rapport JSON horodaté
-    stats["log_path"] = _write_report(stats)
+    # Rapport JSON horodaté dans le dossier logs/ de la clé USB
+    stats["log_path"] = _write_report(stats, logs_dir)
 
     return stats
 
 
-def _write_report(stats: dict) -> str:
+def _write_report(stats: dict, logs_dir: str) -> str:
     """
     Écrit un rapport JSON dans LOGS_DIR.
     Retourne le chemin du fichier de rapport.
     """
     try:
-        os.makedirs(LOGS_DIR, exist_ok=True)
+        os.makedirs(logs_dir, exist_ok=True)
         ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
         op_short = "enc" if stats["operation"] == "Chiffrement" else "dec"
         filename = f"{ts}_{op_short}.json"
-        path     = os.path.join(LOGS_DIR, filename)
+        path     = os.path.join(logs_dir, filename)
 
         # Ne pas sérialiser le champ log_path lui-même dans le rapport
         report = {k: v for k, v in stats.items() if k != "log_path"}

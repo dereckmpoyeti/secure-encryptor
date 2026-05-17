@@ -18,7 +18,7 @@ from colorama import Fore
 from display import print_banner, print_error, print_warning, display_stats, display_usb_status, display_help
 from processor import process_folder, validate_folder_path
 from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status
-from vault import cleanup_orphan_tmp
+from vault import cleanup_orphan_tmp, usb_logs_path
 
 
 # ── Parsing des arguments ─────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ def cmd_encrypt(folder_path: str):
     if aes_key is None:
         sys.exit(1)
 
-    stats = process_folder(folder_path, aes_key, "encrypt")
+    stats = process_folder(folder_path, aes_key, "encrypt", str(usb_logs_path(drive)))
     display_stats(stats)
 
 
@@ -132,7 +132,7 @@ def cmd_decrypt(folder_path: str):
     if aes_key is None:
         sys.exit(1)
 
-    stats = process_folder(folder_path, aes_key, "decrypt")
+    stats = process_folder(folder_path, aes_key, "decrypt", str(usb_logs_path(drive)))
     display_stats(stats)
 
 
