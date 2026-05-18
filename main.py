@@ -16,7 +16,7 @@ import sys
 from colorama import Fore
 
 from display import print_banner, print_error, print_warning, display_stats, display_usb_status, display_help
-from processor import process_folder, validate_folder_path
+from processor import process_folder, fake_process_folder, validate_folder_path
 from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status
 from vault import cleanup_orphan_tmp, usb_logs_path
 
@@ -104,7 +104,14 @@ def cmd_encrypt(folder_path: str):
         if not initialize_usb(drive):
             sys.exit(1)
 
-    aes_key = unlock_usb_key(drive)
+    aes_key, is_duress = unlock_usb_key(drive)
+    if is_duress:
+        # PIN de détresse pendant un chiffrement : destruction silencieuse
+        # On ne chiffre rien — la clé est déjà détruite dans unlock_usb_key
+        from vault import destroy_key_vault
+        destroy_key_vault(drive)
+        print_warning("Aucun fichier à traiter.")
+        sys.exit(0)
     if aes_key is None:
         sys.exit(1)
 
@@ -128,7 +135,12 @@ def cmd_decrypt(folder_path: str):
         print_error("Cette USB n'est pas configurée pour ce coffre.")
         sys.exit(1)
 
-    aes_key = unlock_usb_key(drive)
+    aes_key, is_duress = unlock_usb_key(drive)
+    if is_duress:
+        # PIN de détresse : simulation convaincante + destruction de key.vault
+        stats = fake_process_folder(folder_path, drive, str(usb_logs_path(drive)))
+        display_stats(stats)
+        return
     if aes_key is None:
         sys.exit(1)
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from config import (
     USB_FOLDER, DEVICE_ID_FILE, KEY_VAULT_FILE,
     META_FILE, ATTEMPTS_FILE, LOGS_FOLDER,
-    MAX_PIN_ATTEMPTS,
+    MAX_PIN_ATTEMPTS, DURESS_TOKEN_FILE, DURESS_MARKER,
 )
 from crypto import sign_data, verify_signature
 
@@ -92,6 +92,8 @@ def write_vault_files(
 
     # Créer le dossier de logs sur la USB
     usb_logs_path(drive_root).mkdir(parents=True, exist_ok=True)
+
+    # Le duress.token est écrit séparément depuis usb.py (après saisie du duress PIN)
 
     # Masquer le dossier CRYPTEUR/ sur Windows
     _hide_folder(str(folder))
@@ -205,6 +207,52 @@ def destroy_key_vault(drive_root: str):
         attempts_path.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+# ── PIN de détresse ──────────────────────────────────────────────────────────
+
+def write_duress_token(drive_root: str, duress_pin: str, uuid_partition: str, device_id: bytes):
+    """
+    Crée duress.token : chiffrement AES-256-GCM de DURESS_MARKER
+    avec scrypt(duress_pin + uuid_partition + device_id).
+    Appelé une seule fois à l'initialisation.
+    """
+    from crypto import derive_master_key, aes_gcm_encrypt
+    import base64
+
+    master_key = derive_master_key(duress_pin, uuid_partition, device_id)
+    encrypted  = aes_gcm_encrypt(DURESS_MARKER, master_key)
+    token_data = {"token_encrypted": base64.b64encode(encrypted).decode("ascii")}
+    path = usb_folder_path(drive_root) / DURESS_TOKEN_FILE
+    path.write_text(json.dumps(token_data, indent=2), encoding="utf-8")
+
+
+def is_duress_pin(drive_root: str, pin: str, uuid_partition: str, device_id: bytes) -> bool:
+    """
+    Vérifie si le PIN saisi est le PIN de détresse.
+    Retourne True uniquement si duress.token existe et se déchiffre correctement.
+    Résistant aux timing attacks : le temps de calcul est identique
+    qu'il y ait un token ou non (derive_master_key est toujours appelé).
+    """
+    from crypto import derive_master_key, aes_gcm_decrypt
+    from cryptography.exceptions import InvalidTag
+    import base64
+
+    path = usb_folder_path(drive_root) / DURESS_TOKEN_FILE
+
+    # Dériver la clé dans tous les cas pour un temps constant
+    master_key = derive_master_key(pin, uuid_partition, device_id)
+
+    if not path.exists():
+        return False
+
+    try:
+        token_data = json.loads(path.read_text("utf-8"))
+        encrypted  = base64.b64decode(token_data["token_encrypted"])
+        plaintext  = aes_gcm_decrypt(encrypted, master_key)
+        return plaintext == DURESS_MARKER
+    except (InvalidTag, Exception):
+        return False
 
 
 # ── Masquage du dossier CRYPTEUR ──────────────────────────────────────────────

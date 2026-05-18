@@ -24,6 +24,7 @@ from vault import (
     is_usb_initialized, read_usb_files, write_vault_files,
     usb_folder_path, ensure_folder_hidden,
     read_attempts, write_attempts, reset_attempts, is_locked, destroy_key_vault,
+    write_duress_token, is_duress_pin,
 )
 
 WINDOWS = sys.platform == "win32"
@@ -271,6 +272,37 @@ def initialize_usb(drive_root: str) -> bool:
             continue
         break
 
+    # ── Saisie du PIN de détresse ────────────────────────────────────────────
+    print_separator()
+    typewriter(f"\nDéfinissez un PIN de détresse à {PIN_LENGTH} chiffres.", color=Fore.YELLOW)
+    typewriter("Ce PIN détruira silencieusement la clé si utilisé sous contrainte.", color=Fore.RED)
+    typewriter("Il doit être différent de votre PIN principal.", color=Fore.YELLOW)
+
+    while True:
+        duress1 = ask_pin("PIN de détresse")
+        if duress1 is None:
+            print_warning("Annulé.")
+            return False
+
+        ok, err = validate_pin(duress1)
+        if not ok:
+            print_error(err)
+            continue
+
+        if duress1 == pin1:
+            print_error("Le PIN de détresse doit être différent du PIN principal.")
+            continue
+
+        duress2 = ask_pin("Confirmez le PIN de détresse")
+        if duress2 is None:
+            print_warning("Annulé.")
+            return False
+
+        if duress1 != duress2:
+            print_error("Les PIN ne correspondent pas.")
+            continue
+        break
+
     # Clé AES aléatoire (jamais dérivée d'un mot de passe)
     aes_key    = os.urandom(32)
     master_key = derive_master_key(pin1, uuid_partition, device_id)
@@ -282,8 +314,11 @@ def initialize_usb(drive_root: str) -> bool:
         "key_encrypted":  base64.b64encode(encrypted).decode("ascii"),
     }
 
-    # write_vault_files crée aussi attempts.lock, logs/ et masque le dossier
+    # write_vault_files crée attempts.lock, logs/ et masque le dossier
     write_vault_files(drive_root, device_id, key_vault)
+
+    # Écrire le token du PIN de détresse
+    write_duress_token(drive_root, duress1, uuid_partition, device_id)
 
     print_success("Clé USB configurée avec succès !")
     typewriter("Conservez cette USB et votre PIN en lieu sûr.", color=Fore.YELLOW)
@@ -293,20 +328,18 @@ def initialize_usb(drive_root: str) -> bool:
 
 # ── Déverrouillage ────────────────────────────────────────────────────────────
 
-def unlock_usb_key(drive_root: str) -> bytes | None:
+def unlock_usb_key(drive_root: str) -> tuple[bytes | None, bool]:
     """
-    Déverrouille la clé USB :
-    1. Vérifie si la clé est déjà verrouillée (≥ MAX_PIN_ATTEMPTS tentatives)
-    2. Demande le PIN
-    3. Incrémente le compteur avant chaque tentative
-    4. Succès → remet le compteur à 0, retourne la clé AES
-    5. Échec → compteur incrémenté, verrouillage si limite atteinte
+    Déverrouille la clé USB.
+    Retourne (aes_key, False) en cas de succès normal.
+    Retourne (None, True)     si le PIN de détresse est détecté.
+    Retourne (None, False)    en cas d'échec ou d'annulation.
     """
     try:
         usb_data = read_usb_files(drive_root)
     except RuntimeError as e:
         print_error(str(e))
-        return None
+        return None, False
 
     device_id      = usb_data["device_id"]
     key_vault      = usb_data["key_vault"]
@@ -315,7 +348,7 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
     # ── Vérification du verrou ────────────────────────────────────────────────
     if is_locked(drive_root, device_id):
         _print_locked_message()
-        return None
+        return None, False
 
     print_separator()
     print_info("Déverrouillez la clé USB avec votre PIN.")
@@ -335,14 +368,14 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
         current = read_attempts(drive_root, device_id)
         if current >= MAX_PIN_ATTEMPTS:
             _print_locked_message()
-            return None
+            return None, False
 
         pin = ask_pin("PIN")
 
         # Annulation explicite (ne consomme pas de tentative)
         if pin is None or pin.lower() == "q":
             print_warning("Annulé.")
-            return None
+            return None, False
 
         # ── Incrémenter le compteur AVANT toute vérification ─────────────────
         # Toute saisie non annulée (format invalide ou PIN incorrect) consomme
@@ -358,9 +391,16 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
             if remaining_after <= 0:
                 destroy_key_vault(drive_root)
                 _print_locked_message()
-                return None
+                return None, False
             print_error(f"{err} ({remaining_after} tentative(s) restante(s))")
             continue
+
+        # ── Vérifier le PIN de détresse AVANT le PIN principal ────────────────
+        # Les deux dérivations scrypt prennent le même temps → pas de timing leak
+        if is_duress_pin(drive_root, pin, uuid_partition, device_id):
+            reset_attempts(drive_root, device_id)
+            print_success("Clé USB déverrouillée.")   # Message normal, pas de suspicion
+            return None, True                          # Signal duress vers l'appelant
 
         try:
             master_key    = derive_master_key(pin, uuid_partition, device_id)
@@ -370,14 +410,14 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
             # ── Succès : remettre le compteur à 0 ────────────────────────────
             reset_attempts(drive_root, device_id)
             print_success("Clé USB déverrouillée.")
-            return aes_key
+            return aes_key, False
 
         except InvalidTag:
             remaining_after = MAX_PIN_ATTEMPTS - new_count
             if remaining_after <= 0:
                 destroy_key_vault(drive_root)
                 _print_locked_message()
-                return None
+                return None, False
             else:
                 print_error(
                     f"PIN incorrect. "
@@ -386,7 +426,7 @@ def unlock_usb_key(drive_root: str) -> bytes | None:
 
         except Exception as e:
             print_error(f"Erreur inattendue : {e}")
-            return None
+            return None, False
 
 
 def _print_locked_message():

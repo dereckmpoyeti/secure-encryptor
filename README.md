@@ -27,6 +27,7 @@ Outil en ligne de commande pour chiffrer et déchiffrer récursivement les fichi
 - Dossier `CRYPTEUR/` caché sur Windows (attributs Système + Caché).
 - Verrouillage définitif après 5 tentatives de PIN incorrectes (format invalide inclus).
 - À la 5ème tentative échouée : destruction cryptographique irréversible de `key.vault` (3 passes aléatoires + suppression).
+- **PIN de détresse** obligatoire à l'initialisation : un second PIN qui simule un déchiffrement normal tout en détruisant `key.vault` en arrière-plan — pour une utilisation sous contrainte.
 
 **Rapports**
 - Rapports JSON horodatés écrits dans `CRYPTEUR/logs/` sur la clé USB.
@@ -97,9 +98,10 @@ python main.py --encrypt "C:\Users\Alice\Documents\mon dossier"
 2. Branchez la clé USB et appuyez sur Entrée.
 3. Confirmez la clé détectée (ou choisissez parmi plusieurs).
 4. Si la clé n'est pas encore configurée, le programme crée automatiquement le dossier `CRYPTEUR/`.
-5. Définissez un PIN à exactement 8 chiffres (saisi deux fois pour confirmation).
-6. Le programme génère une clé AES-256 aléatoire, la chiffre et l'écrit dans `key.vault`.
-7. Le dossier cible est chiffré récursivement.
+5. Définissez un PIN principal à exactement 8 chiffres (saisi deux fois pour confirmation).
+6. Définissez un PIN de détresse à 8 chiffres, différent du PIN principal (saisi deux fois pour confirmation).
+7. Le programme génère une clé AES-256 aléatoire, la chiffre et l'écrit dans `key.vault`.
+8. Le dossier cible est chiffré récursivement.
 
 > **Attention :** notez votre PIN et conservez la clé USB en lieu sûr. Il n'existe aucun mécanisme de récupération.
 
@@ -114,6 +116,7 @@ CRYPTEUR/
 ├── device.id       # Identifiant aléatoire de 32 octets lié à cette USB
 ├── key.vault       # Clé AES-256 chiffrée par la clé maître
 ├── attempts.lock   # Compteur de tentatives PIN signé HMAC-SHA256
+├── duress.token    # Token chiffré du PIN de détresse
 ├── meta.json       # Métadonnées de création
 └── logs/           # Rapports JSON horodatés
     ├── 20250517_143012_enc.json
@@ -137,6 +140,40 @@ Le programme comptabilise **toute saisie non annulée** comme une tentative, y c
 **Les fichiers chiffrés avec cette USB sont alors définitivement inaccessibles**, même en connaissant le PIN ou en récupérant physiquement la clé USB.
 
 Le seuil de 5 tentatives est configurable dans `config.py` (`MAX_PIN_ATTEMPTS`).
+
+---
+
+## PIN de détresse
+
+Le PIN de détresse est un second PIN à 8 chiffres, obligatoire à l'initialisation et différent du PIN principal. Il est conçu pour être utilisé sous contrainte physique — si quelqu'un vous force à déverrouiller la clé USB.
+
+**Ce que voit la personne qui vous contraint :**
+
+```
+✓ Clé USB déverrouillée.
+Validation de la clé sur un fichier test...
+✓ Clé validée.
+
+Traitement :
+  Dossier    : C:\Users\Dereck\Documents\secrets
+  Fichiers   : 47
+  Taille     : 2.3 GB
+
+Déchiffrement |████████████████| 47/47 fichiers [00:12, 3.8 MB/s]
+
+✓ Traitement terminé !
+Avertissement : certains fichiers semblent corrompus. Relancez --verify pour diagnostiquer.
+```
+
+**Ce qui se passe réellement :**
+- Les fichiers `.encrypted` sont renommés avec leur vraie extension — le contenu reste chiffré, seul le nom change.
+- `key.vault` est détruit en 3 passes dans un thread parallèle pendant la progression.
+- Un rapport JSON falsifié est écrit dans `CRYPTEUR/logs/`.
+- À la prochaine connexion de la USB, `key.vault` est absent → verrouillage définitif.
+
+Le PIN de détresse est stocké sous forme de token chiffré dans `duress.token`. Il ne peut pas être distingué du PIN principal par une analyse du contenu de la clé USB.
+
+> **Important :** mémorisez votre PIN de détresse. Ne le notez pas au même endroit que le PIN principal.
 
 ---
 
@@ -181,10 +218,11 @@ Les fichiers chiffrés prennent l'extension `.encrypted`. Au déchiffrement, cet
 - AES-256-GCM garantit confidentialité et intégrité simultanément — toute altération du fichier est détectée.
 - Le compteur de tentatives est signé HMAC-SHA256 et lié physiquement au `device_id` de la USB.
 - La destruction de `key.vault` est effectuée par 3 passes d'écrasement aléatoire avec `fsync` avant suppression.
+- L'effacement sécurisé des fichiers sources (`_secure_delete`) applique la même rigueur : 3 passes aléatoires avec `flush()` + `fsync()` à chaque passe, en mode `r+b` (écriture en place) pour éviter que le système de fichiers alloue un nouveau bloc.
 
 **Limites connues**
 
-*Effacement sécurisé et wear leveling :* sur les clés USB avec contrôleur intelligent, le wear leveling peut rediriger les écritures vers d'autres blocs physiques. Les 3 passes d'écrasement sont efficaces sur la grande majorité des clés USB grand public, mais un outil forensique spécialisé pourrait théoriquement récupérer des données sur un support haut de gamme. Cette limite est inhérente au support flash et ne peut pas être contournée en logiciel pur.
+*Effacement sécurisé et wear leveling :* cette limite s'applique à la fois à `_secure_delete` (fichiers sources après chiffrement) et à `destroy_key_vault` (`key.vault` après verrouillage ou duress PIN). Sur les SSD et les clés USB avec contrôleur intelligent, le wear leveling peut rediriger les écritures vers d'autres cellules physiques — les 3 passes avec `fsync` réduisent le risque mais ne l'éliminent pas complètement. Un outil forensique spécialisé lisant directement la puce NAND pourrait théoriquement récupérer des données. Cette limite est inhérente au support flash et ne peut pas être contournée en logiciel pur.
 
 *Mémoire Python :* le PIN et la clé AES transitent en clair dans la mémoire du processus Python pendant l'exécution. Ce risque est difficile à éliminer en Python pur.
 

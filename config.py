@@ -10,7 +10,7 @@ SALT_SIZE       = 16        # octets
 IV_SIZE         = 12        # octets (96 bits, standard GCM)
 TAG_SIZE        = 16        # octets (128 bits)
 CHUNK_SIZE      = 1024 * 1024   # 1 Mo par bloc de lecture/écriture
-SCRYPT_N        = 2 ** 17   # Coût CPU/mémoire scrypt (augmenter = plus lent = plus sûr)
+SCRYPT_N        = 2 ** 14   # Coût CPU/mémoire scrypt (augmenter = plus lent = plus sûr)
 SCRYPT_R        = 8
 SCRYPT_P        = 1
 
@@ -22,6 +22,11 @@ META_FILE        = "meta.json"
 ATTEMPTS_FILE    = "attempts.lock"   # Compteur de tentatives PIN signé (HMAC)
 PIN_LENGTH       = 8                 # Longueur exacte du PIN (chiffres uniquement)
 MAX_PIN_ATTEMPTS = 5                 # Tentatives PIN avant verrouillage définitif
+
+
+# ── PIN de détresse ──────────────────────────────────────────────────────────
+DURESS_TOKEN_FILE = "duress.token"   # Token chiffré du PIN de détresse
+DURESS_MARKER     = b"DURESS_OK"     # Valeur attendue après déchiffrement du token
 
 
 # ── Rapports ──────────────────────────────────────────────────────────────────

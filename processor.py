@@ -6,6 +6,7 @@ Rapport détaillé horodaté, indicateur de progression en Mo/s.
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -175,12 +176,25 @@ def decrypt_file(input_file: str, aes_key: bytes) -> int:
 def _secure_delete(path: str):
     """
     Écrase le contenu d'un fichier avec des données aléatoires avant suppression.
-    Réduit le risque de récupération des données sur disque.
+
+    3 passes avec flush() + fsync() à chaque passe pour forcer l'écriture
+    physique sur le support — même logique que destroy_key_vault() dans vault.py.
+
+    Limites connues :
+      - SSD/flash : le wear leveling du contrôleur peut rediriger les écritures
+        vers d'autres cellules physiques. Ces 3 passes réduisent le risque mais
+        ne l'éliminent pas complètement sur ces supports.
+      - Pour une protection maximale, chiffrez le disque au niveau OS
+        (BitLocker, LUKS, FileVault).
     """
     try:
         size = os.path.getsize(path)
-        with open(path, "wb") as f:
-            f.write(os.urandom(size))
+        with open(path, "r+b") as f:
+            for _ in range(3):
+                f.seek(0)
+                f.write(os.urandom(size))
+                f.flush()
+                os.fsync(f.fileno())
         os.remove(path)
     except Exception:
         # En dernier recours, suppression classique
@@ -373,6 +387,145 @@ def process_folder(
 """)
 
     # Rapport JSON horodaté dans le dossier logs/ de la clé USB
+    stats["log_path"] = _write_report(stats, logs_dir)
+
+    return stats
+
+
+
+# ── Mode détresse ─────────────────────────────────────────────────────────────
+
+def fake_process_folder(
+    folder_path: str,
+    drive_root: str,
+    logs_dir: str = "logs",
+) -> dict:
+    """
+    Simule un déchiffrement convaincant pour le mode détresse (duress PIN).
+
+    Ce qui se passe réellement :
+      - Les fichiers .encrypted sont renommés sans leur extension
+        (le contenu reste chiffré — seul le nom change).
+      - Une fausse barre de progression s'affiche à vitesse réaliste.
+      - key.vault est détruit en 3 passes dans un thread parallèle
+        pendant la progression — sans bloquer l'affichage.
+      - Un rapport JSON falsifié est écrit dans logs/.
+      - Un message d'erreur générique est affiché à la fin pour
+        orienter l'attaquant vers une fausse piste.
+
+    L'attaquant voit des fichiers renommés sans extension .encrypted,
+    une progression normale, et un message de fin standard.
+    """
+    from vault import destroy_key_vault
+
+    start    = time.time()
+    label_op = "Déchiffrement"
+
+    stats = {
+        "folder":        folder_path,
+        "operation":     label_op,
+        "files_count":   0,
+        "success_count": 0,
+        "error_count":   0,
+        "total_size":    0,
+        "throughput":    "N/A",
+        "duration":      "N/A",
+        "timestamp":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "log_path":      "N/A",
+        "errors":        [],
+    }
+
+    # Collecter les fichiers .encrypted à "traiter"
+    files_to_process = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".tmp"):
+                continue
+            path = os.path.join(root, file)
+            if is_encrypted_file(path):
+                try:
+                    stats["total_size"] += os.path.getsize(path)
+                except OSError:
+                    pass
+                files_to_process.append(path)
+
+    stats["files_count"] = len(files_to_process)
+
+    if not files_to_process:
+        print_warning("Aucun fichier à traiter.")
+        return stats
+
+    print(f"""
+{Fore.CYAN}Traitement :{Fore.WHITE}
+  Dossier    : {folder_path}
+  Fichiers   : {stats["files_count"]}
+  Taille     : {format_size(stats["total_size"])}
+""")
+
+    # ── Lancer la destruction de key.vault en arrière-plan ────────────────────
+    destroy_thread = threading.Thread(
+        target=destroy_key_vault,
+        args=(drive_root,),
+        daemon=True,
+    )
+    destroy_thread.start()
+
+    # ── Fausse progression : renommer les fichiers + simuler le débit ─────────
+    bytes_done = 0
+    bar_format = (
+        "{l_bar}{bar}| {n_fmt}/{total_fmt} fichiers "
+        "[{elapsed}<{remaining}, {postfix}]"
+    )
+
+    with tqdm(
+        total=len(files_to_process),
+        desc=label_op,
+        bar_format=bar_format,
+        unit="f",
+    ) as pbar:
+        for path in files_to_process:
+            try:
+                file_size = os.path.getsize(path)
+
+                # Renommer : retirer l'extension .encrypted
+                output = get_output_path(path, "decrypt")
+                if output != path:
+                    os.rename(path, output)
+
+                bytes_done += file_size
+                stats["success_count"] += 1
+
+            except Exception as e:
+                stats["error_count"] += 1
+                stats["errors"].append(f"{path} — {e}")
+
+            elapsed    = time.time() - start
+            throughput = bytes_done / elapsed if elapsed > 0 else 0
+            pbar.set_postfix_str(f"{format_size(int(throughput))}/s")
+            pbar.update(1)
+
+    # S'assurer que la destruction est terminée avant de continuer
+    destroy_thread.join(timeout=10)
+
+    duration       = time.time() - start
+    throughput_avg = bytes_done / duration if duration > 0 else 0
+    stats["duration"]   = f"{duration:.1f}s"
+    stats["throughput"] = f"{format_size(int(throughput_avg))}/s"
+
+    # ── Message de fin trompeur ───────────────────────────────────────────────
+    print(f"""
+{Fore.GREEN}Traitement terminé !{Fore.WHITE}
+  Succès  : {stats["success_count"]}
+  Échecs  : {stats["error_count"]}
+  Débit   : {stats["throughput"]}
+  Durée   : {stats["duration"]}
+""")
+    print_warning(
+        "Avertissement : certains fichiers semblent corrompus. "
+        "Relancez --verify pour diagnostiquer."
+    )
+
+    # Rapport JSON dans logs/ (falsifié mais cohérent)
     stats["log_path"] = _write_report(stats, logs_dir)
 
     return stats
