@@ -393,6 +393,130 @@ def process_folder(
 
 
 
+
+# ── Vérification d'intégrité ──────────────────────────────────────────────────
+
+def verify_file(path: str, aes_key: bytes) -> tuple[bool, str]:
+    """
+    Vérifie l'intégrité d'un fichier chiffré via le tag GCM.
+    Ne déchiffre pas — lit uniquement le tag et valide la signature.
+    Retourne (True, "") si OK, (False, raison) si corrompu.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as src:
+            if src.read(len(MAGIC)) != MAGIC:
+                return False, "Magic header invalide"
+
+            version = src.read(1)
+            if version != FORMAT_VERSION:
+                return False, f"Version non supportée : {version!r}"
+
+            salt = src.read(SALT_SIZE)
+            iv   = src.read(IV_SIZE)
+
+            header_size     = len(MAGIC) + 1 + SALT_SIZE + IV_SIZE
+            ciphertext_size = size - header_size - TAG_SIZE
+            if ciphertext_size < 0:
+                return False, "Fichier tronqué ou incomplet"
+
+            src.seek(size - TAG_SIZE)
+            tag = src.read(TAG_SIZE)
+            src.seek(header_size)
+
+            file_key  = derive_file_key(aes_key, salt)
+            cipher    = Cipher(
+                algorithms.AES(file_key),
+                modes.GCM(iv, tag),
+                backend=default_backend(),
+            )
+            decryptor = cipher.decryptor()
+            remaining = ciphertext_size
+            while remaining > 0:
+                chunk = src.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                decryptor.update(chunk)
+            decryptor.finalize()
+            return True, ""
+
+    except InvalidTag:
+        return False, "Tag GCM invalide — fichier corrompu ou clé incorrecte"
+    except Exception as e:
+        return False, str(e)
+
+
+def verify_folder(
+    folder_path: str,
+    aes_key: bytes,
+) -> dict:
+    """
+    Inventorie un dossier et vérifie l'intégrité de chaque fichier chiffré.
+
+    Retourne un dict avec :
+      - inventaire complet (totaux, tailles, orphelins)
+      - résultats fichier par fichier
+      - compteurs ok / corrompus / inconnus
+    """
+    result = {
+        "folder":            folder_path,
+        "total_files":       0,
+        "encrypted_files":   0,
+        "plain_files":       0,
+        "orphan_tmp":        0,
+        "total_size":        0,
+        "encrypted_size":    0,
+        "plain_size":        0,
+        "ok_count":          0,
+        "corrupt_count":     0,
+        "details":           [],   # liste de dicts {path, status, reason, size}
+    }
+
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            path = os.path.join(root, file)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+
+            # Fichiers temporaires orphelins
+            if file.endswith(".tmp"):
+                result["orphan_tmp"] += 1
+                continue
+
+            result["total_files"] += 1
+            result["total_size"]  += size
+
+            if is_encrypted_file(path):
+                result["encrypted_files"] += 1
+                result["encrypted_size"]  += size
+
+                ok, reason = verify_file(path, aes_key)
+                if ok:
+                    result["ok_count"] += 1
+                    result["details"].append({
+                        "path":   path,
+                        "status": "ok",
+                        "reason": "",
+                        "size":   size,
+                    })
+                else:
+                    result["corrupt_count"] += 1
+                    result["details"].append({
+                        "path":   path,
+                        "status": "corrompu",
+                        "reason": reason,
+                        "size":   size,
+                    })
+            else:
+                result["plain_files"] += 1
+                result["plain_size"]  += size
+
+    return result
+
+
 # ── Mode détresse ─────────────────────────────────────────────────────────────
 
 def fake_process_folder(

@@ -6,6 +6,8 @@ Usage :
   python main.py --encrypt <dossier>
   python main.py --decrypt <dossier>
   python main.py --status
+  python main.py --verify
+  python main.py --verify /mon/dossier
   python main.py --reset-pin
   python main.py --help
 """
@@ -15,9 +17,9 @@ import sys
 
 from colorama import Fore
 
-from display import print_banner, print_error, print_warning, display_stats, display_usb_status, display_help
-from processor import process_folder, fake_process_folder, validate_folder_path
-from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status, reset_pin
+from display import print_banner, print_error, print_warning, display_stats, display_usb_status, display_help, display_verify_usb, display_verify_folder
+from processor import process_folder, fake_process_folder, validate_folder_path, verify_folder
+from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status, reset_pin, get_usb_verify_info
 from vault import cleanup_orphan_tmp, usb_logs_path
 
 
@@ -54,6 +56,10 @@ Exemples :
     group.add_argument(
         "--reset-pin", action="store_true",
         help="Réinitialise le PIN principal et le PIN de détresse.",
+    )
+    group.add_argument(
+        "--verify", metavar="DOSSIER", nargs="?", const="",
+        help="Vérifie la clé USB et l'intégrité des fichiers du dossier (optionnel).",
     )
     group.add_argument(
         "--help", "-h", action="store_true",
@@ -170,6 +176,48 @@ def cmd_status():
 
 
 
+def cmd_verify(folder_path: str | None):
+    print_warning("\nBranchez la clé USB et appuyez sur Entrée.")
+    try:
+        input()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit(0)
+
+    drive = select_usb_drive()
+    if not drive:
+        sys.exit(1)
+
+    # ── Vérification de la clé USB ────────────────────────────────────────
+    usb_info = get_usb_verify_info(drive)
+    display_verify_usb(usb_info)
+
+    if not usb_info.get("initialized"):
+        print_warning("Clé USB non configurée — vérification du dossier impossible.")
+        return
+
+    if usb_info.get("locked"):
+        print_error("Clé USB verrouillée — vérification du dossier impossible.")
+        return
+
+    # ── Vérification du dossier (optionnelle) ────────────────────────────
+    if folder_path is None or folder_path == "":
+        return   # Pas de dossier fourni : statut USB uniquement
+
+    folder_path, error = validate_folder_path(folder_path)
+    if error:
+        print_error(error)
+        sys.exit(1)
+
+    aes_key, is_duress = unlock_usb_key(drive)
+    if is_duress or aes_key is None:
+        print_error("Impossible de vérifier sans clé valide.")
+        sys.exit(1)
+
+    result = verify_folder(folder_path, aes_key)
+    display_verify_folder(result)
+
+
 def cmd_reset_pin():
     print_warning("\nBranchez la clé USB et appuyez sur Entrée.")
     try:
@@ -217,6 +265,9 @@ def main():
 
         elif args.reset_pin:
             cmd_reset_pin()
+
+        elif args.verify is not None:
+            cmd_verify(args.verify)
 
 
     except KeyboardInterrupt:

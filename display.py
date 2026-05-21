@@ -142,6 +142,120 @@ Tentatives     : {attempts} / {max_att}
 """)
 
 
+
+# ── Vérification ──────────────────────────────────────────────────────────────
+
+def display_verify_usb(info: dict):
+    """Affiche le rapport de vérification de la clé USB."""
+    files = info.get("files", {})
+
+    def file_status(present: bool, label: str) -> str:
+        if present:
+            return f"{Fore.GREEN}✓ Présent{Style.RESET_ALL}    {label}"
+        return f"{Fore.RED}✗ Manquant{Style.RESET_ALL}   {label}"
+
+    locked   = info.get("locked", False)
+    attempts = info.get("attempts", 0)
+    max_att  = info.get("max_attempts", 5)
+    lock_str = (
+        f"{Fore.RED}VERROUILLÉE{Style.RESET_ALL}"
+        if locked
+        else f"{Fore.GREEN}Opérationnelle{Style.RESET_ALL}"
+    )
+    hmac_ok  = info.get("hmac_ok", True)
+    hmac_str = (
+        f"{Fore.GREEN}✓ Valide{Style.RESET_ALL}"
+        if hmac_ok
+        else f"{Fore.RED}✗ Falsifié ou corrompu{Style.RESET_ALL}"
+    )
+    logs_count = info.get("logs_count", 0)
+    logs_size  = info.get("logs_size", 0)
+
+    print(f"""
+{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}
+{Fore.GREEN}  VÉRIFICATION DE LA CLÉ USB{Style.RESET_ALL}
+{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}
+
+{Fore.YELLOW}Identification{Style.RESET_ALL}
+  Lecteur        : {info.get("drive", "N/A")}
+  UUID partition : {info.get("uuid_partition", "N/A")}
+  Créée le       : {info.get("created_at", "N/A")}
+
+{Fore.YELLOW}Fichiers CRYPTEUR/{Style.RESET_ALL}
+  {file_status(files.get("device_id"), "device.id  — identifiant USB")}
+  {file_status(files.get("key_vault"), "key.vault  — clé AES chiffrée")}
+  {file_status(files.get("duress_token"), "duress.token — PIN de détresse")}
+  {file_status(files.get("attempts_lock"), "attempts.lock — compteur de tentatives")}
+  {file_status(files.get("meta"), "meta.json  — métadonnées")}
+
+{Fore.YELLOW}Sécurité{Style.RESET_ALL}
+  Statut         : {lock_str}
+  Tentatives PIN : {attempts} / {max_att}
+  HMAC verrou    : {hmac_str}
+
+{Fore.YELLOW}Journaux{Style.RESET_ALL}
+  Rapports       : {logs_count} fichier(s) — {format_size(logs_size)}
+{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}
+""")
+
+
+def display_verify_folder(result: dict):
+    """Affiche le rapport de vérification d'intégrité du dossier."""
+    ok_count      = result.get("ok_count", 0)
+    corrupt_count = result.get("corrupt_count", 0)
+    orphan_tmp    = result.get("orphan_tmp", 0)
+    details       = result.get("details", [])
+
+    # Résumé global
+    if corrupt_count == 0 and ok_count > 0:
+        integrity_str = f"{Fore.GREEN}✓ Tous les fichiers sont intègres{Style.RESET_ALL}"
+    elif corrupt_count > 0:
+        integrity_str = f"{Fore.RED}✗ {corrupt_count} fichier(s) corrompu(s) détecté(s){Style.RESET_ALL}"
+    else:
+        integrity_str = f"{Fore.YELLOW}Aucun fichier chiffré trouvé{Style.RESET_ALL}"
+
+    print(f"""
+{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}
+{Fore.GREEN}  VÉRIFICATION DU DOSSIER{Style.RESET_ALL}
+{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}
+
+{Fore.YELLOW}Inventaire{Style.RESET_ALL}
+  Dossier        : {result.get("folder", "N/A")}
+  Total fichiers : {result.get("total_files", 0)}
+  Chiffrés       : {result.get("encrypted_files", 0)}  ({format_size(result.get("encrypted_size", 0))})
+  En clair       : {result.get("plain_files", 0)}  ({format_size(result.get("plain_size", 0))})
+  Taille totale  : {format_size(result.get("total_size", 0))}
+  Fichiers .tmp  : {orphan_tmp} orphelin(s){"  ⚠" if orphan_tmp > 0 else ""}
+
+{Fore.YELLOW}Intégrité GCM{Style.RESET_ALL}
+  {integrity_str}
+  Vérifiés OK    : {ok_count}
+  Corrompus      : {corrupt_count}
+""")
+
+    # Détail des fichiers corrompus uniquement
+    corrupted = [d for d in details if d["status"] == "corrompu"]
+    if corrupted:
+        print(f"{Fore.RED}  Fichiers corrompus :{Style.RESET_ALL}")
+        for d in corrupted:
+            print(f"    ✗ {d['path']}")
+            print(f"      → {d['reason']}")
+        print()
+
+    # Détail complet si tout est OK (liste courte)
+    elif ok_count > 0 and ok_count <= 20:
+        print(f"{Fore.GREEN}  Détail :{Style.RESET_ALL}")
+        for d in details:
+            size_str = format_size(d["size"])
+            print(f"    ✓ {d['path']}  ({size_str})")
+        print()
+
+    elif ok_count > 20:
+        print(f"{Fore.GREEN}  (détail omis — {ok_count} fichiers OK){Style.RESET_ALL}\n")
+
+    print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}\n")
+
+
 def display_help():
     """Affiche l'aide CLI."""
     print(f"""
@@ -151,6 +265,7 @@ def display_help():
   python main.py --encrypt <dossier>   Chiffre tous les fichiers du dossier
   python main.py --decrypt <dossier>   Déchiffre tous les fichiers du dossier
   python main.py --status              Affiche l'état de la clé USB connectée
+  python main.py --verify [dossier]    Vérifie la clé USB et l'intégrité des fichiers
   python main.py --reset-pin           Réinitialise le PIN principal et le PIN de détresse
   python main.py --help                Affiche cette aide
 

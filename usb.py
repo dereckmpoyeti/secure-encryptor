@@ -13,6 +13,7 @@ from colorama import Fore
 from config import (
     PIN_LENGTH, MAX_PIN_ATTEMPTS,
     KEY_VAULT_FILE, DEVICE_ID_FILE,
+    DURESS_TOKEN_FILE, META_FILE, ATTEMPTS_FILE,
 )
 from crypto import derive_master_key, aes_gcm_encrypt, aes_gcm_decrypt
 from cryptography.exceptions import InvalidTag
@@ -24,7 +25,7 @@ from vault import (
     is_usb_initialized, read_usb_files, write_vault_files,
     usb_folder_path, ensure_folder_hidden,
     read_attempts, write_attempts, reset_attempts, is_locked, destroy_key_vault,
-    write_duress_token, is_duress_pin,
+    write_duress_token, is_duress_pin, usb_logs_path,
 )
 
 WINDOWS = sys.platform == "win32"
@@ -651,4 +652,82 @@ def get_usb_status(drive_root: str) -> dict | None:
         "attempts":       attempts,
         "max_attempts":   MAX_PIN_ATTEMPTS,
         "locked":         locked,
+    }
+
+
+def get_usb_verify_info(drive_root: str) -> dict:
+    """
+    Collecte toutes les informations de vérification de la clé USB.
+    Ne demande pas le PIN — inspecte uniquement les métadonnées.
+    Retourne un dict complet utilisé par display_verify_usb().
+    """
+    from pathlib import Path
+    import struct
+
+    folder      = usb_folder_path(drive_root)
+    initialized = is_usb_initialized(drive_root)
+
+    # ── Présence des fichiers ─────────────────────────────────────────────────
+    files = {
+        "device_id":    (folder / DEVICE_ID_FILE).exists(),
+        "key_vault":    (folder / KEY_VAULT_FILE).exists(),
+        "duress_token": (folder / DURESS_TOKEN_FILE).exists(),
+        "attempts_lock":(folder / ATTEMPTS_FILE).exists(),
+        "meta":         (folder / META_FILE).exists(),
+    }
+
+    # ── Métadonnées ───────────────────────────────────────────────────────────
+    uuid_partition = "N/A"
+    created_at     = "N/A"
+    attempts       = 0
+    hmac_ok        = True
+    locked         = False
+    device_id      = b""
+
+    if initialized:
+        try:
+            usb_data       = read_usb_files(drive_root)
+            device_id      = usb_data["device_id"]
+            uuid_partition = usb_data["key_vault"].get("uuid_partition", "N/A")
+            created_at     = usb_data["meta"].get("created_at", "N/A")
+            attempts       = read_attempts(drive_root, device_id)
+            locked         = is_locked(drive_root, device_id)
+
+            # Vérifier l'intégrité du HMAC de attempts.lock
+            attempts_path = folder / ATTEMPTS_FILE
+            if attempts_path.exists():
+                from crypto import verify_signature
+                data      = attempts_path.read_bytes()
+                count_raw = data[:4]
+                signature = data[4:36]
+                hmac_key  = b"attempts:" + device_id
+                hmac_ok   = verify_signature(count_raw, signature, hmac_key)
+        except Exception:
+            pass
+
+    # ── Statistiques logs ─────────────────────────────────────────────────────
+    logs_count = 0
+    logs_size  = 0
+    logs_path  = usb_logs_path(drive_root)
+    if logs_path.exists():
+        for f in logs_path.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                logs_count += 1
+                try:
+                    logs_size += f.stat().st_size
+                except OSError:
+                    pass
+
+    return {
+        "drive":          drive_root,
+        "initialized":    initialized,
+        "uuid_partition": uuid_partition,
+        "created_at":     created_at,
+        "files":          files,
+        "attempts":       attempts,
+        "max_attempts":   MAX_PIN_ATTEMPTS,
+        "locked":         locked,
+        "hmac_ok":        hmac_ok,
+        "logs_count":     logs_count,
+        "logs_size":      logs_size,
     }
