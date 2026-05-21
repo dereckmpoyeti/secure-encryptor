@@ -444,6 +444,181 @@ def _print_locked_message():
     )
 
 
+
+# ── Réinitialisation du PIN ──────────────────────────────────────────────────
+
+def reset_pin(drive_root: str) -> bool:
+    """
+    Réinitialise le PIN principal et le PIN de détresse sans toucher aux fichiers.
+
+    Flux :
+      1. Déverrouillage avec le PIN actuel (consomme des tentatives)
+      2. Saisie du nouveau PIN principal (confirmé deux fois)
+      3. Demande si l'utilisateur veut changer le PIN de détresse
+         - OUI : saisir le nouveau duress PIN (confirmé deux fois)
+         - NON : ressaisir l'ancien duress PIN (Option A — obligatoire)
+      4. Écriture atomique du nouveau key.vault via fichier .tmp
+      5. Re-génération de duress.token
+      6. Remise à zéro de attempts.lock
+    Retourne True si succès, False si annulé ou échoué.
+    """
+    try:
+        usb_data = read_usb_files(drive_root)
+    except RuntimeError as e:
+        print_error(str(e))
+        return False
+
+    device_id      = usb_data["device_id"]
+    key_vault      = usb_data["key_vault"]
+    uuid_partition = key_vault["uuid_partition"]
+
+    # ── Vérification du verrou ────────────────────────────────────────────────
+    if is_locked(drive_root, device_id):
+        print_error("Clé USB verrouillée — réinitialisation impossible.")
+        return False
+
+    print_separator()
+    print_info("RÉINITIALISATION DU PIN")
+    typewriter("Saisissez votre PIN actuel pour continuer.", color=Fore.YELLOW)
+
+    # ── Déverrouillage avec le PIN actuel ─────────────────────────────────────
+    aes_key, is_duress = unlock_usb_key(drive_root)
+    if is_duress:
+        print_error("Opération annulée.")
+        return False
+    if aes_key is None:
+        return False
+
+    # ── Nouveau PIN principal ─────────────────────────────────────────────────
+    print_separator()
+    typewriter("Définissez votre nouveau PIN principal.", color=Fore.YELLOW)
+
+    while True:
+        new_pin1 = ask_pin("Nouveau PIN principal")
+        if new_pin1 is None:
+            print_warning("Annulé.")
+            return False
+
+        ok, err = validate_pin(new_pin1)
+        if not ok:
+            print_error(err)
+            continue
+
+        new_pin2 = ask_pin("Confirmez le nouveau PIN principal")
+        if new_pin2 is None:
+            print_warning("Annulé.")
+            return False
+
+        if new_pin1 != new_pin2:
+            print_error("Les PIN ne correspondent pas.")
+            continue
+        break
+
+    # ── PIN de détresse : changer ou conserver ? ──────────────────────────────
+    print_separator()
+    rep = input(
+        f"{Fore.CYAN}Voulez-vous changer votre PIN de détresse ? (O/n) :{Fore.WHITE} >> "
+    ).strip().lower()
+    change_duress = rep in ("", "o", "oui", "y", "yes")
+
+    if change_duress:
+        typewriter("Définissez votre nouveau PIN de détresse.", color=Fore.YELLOW)
+        while True:
+            new_duress1 = ask_pin("Nouveau PIN de détresse")
+            if new_duress1 is None:
+                print_warning("Annulé.")
+                return False
+
+            ok, err = validate_pin(new_duress1)
+            if not ok:
+                print_error(err)
+                continue
+
+            if new_duress1 == new_pin1:
+                print_error("Le PIN de détresse doit être différent du PIN principal.")
+                continue
+
+            new_duress2 = ask_pin("Confirmez le nouveau PIN de détresse")
+            if new_duress2 is None:
+                print_warning("Annulé.")
+                return False
+
+            if new_duress1 != new_duress2:
+                print_error("Les PIN ne correspondent pas.")
+                continue
+            break
+        duress_pin = new_duress1
+
+    else:
+        # Option A : ressaisir l'ancien duress PIN — obligatoire
+        typewriter(
+            "Saisissez votre PIN de détresse actuel pour confirmer.",
+            color=Fore.YELLOW,
+        )
+        old_duress = ask_pin("PIN de détresse actuel")
+        if old_duress is None:
+            print_warning("Annulé.")
+            return False
+
+        ok, err = validate_pin(old_duress)
+        if not ok:
+            print_error(f"PIN de détresse invalide : {err}")
+            print_error("Opération annulée.")
+            return False
+
+        if not is_duress_pin(drive_root, old_duress, uuid_partition, device_id):
+            print_error(
+                "PIN de détresse incorrect. "
+                "Sans ce PIN, la réinitialisation est impossible."
+            )
+            print_error("Opération annulée. Vos PIN actuels sont inchangés.")
+            return False
+
+        duress_pin = old_duress
+
+    # ── Écriture atomique du nouveau key.vault ────────────────────────────────
+    import json as _json
+    folder     = usb_folder_path(drive_root)
+    vault_path = folder / KEY_VAULT_FILE
+    temp_path  = vault_path.with_suffix(".tmp")
+
+    try:
+        new_master_key = derive_master_key(new_pin1, uuid_partition, device_id)
+        new_encrypted  = aes_gcm_encrypt(aes_key, new_master_key)
+
+        new_vault = {
+            "version":        key_vault.get("version", 1),
+            "uuid_partition": uuid_partition,
+            "key_encrypted":  base64.b64encode(new_encrypted).decode("ascii"),
+        }
+
+        temp_path.write_text(_json.dumps(new_vault, indent=2), encoding="utf-8")
+        # Remplacement atomique — si coupure avant ici, l'ancien vault est intact
+        temp_path.replace(vault_path)
+
+    except Exception as e:
+        print_error(f"Erreur lors de l'écriture du nouveau vault : {e}")
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    # ── Re-génération du duress.token ─────────────────────────────────────────
+    try:
+        write_duress_token(drive_root, duress_pin, uuid_partition, device_id)
+    except Exception as e:
+        print_error(f"Erreur lors de la mise à jour du PIN de détresse : {e}")
+        return False
+
+    # ── Remise à zéro du compteur de tentatives ───────────────────────────────
+    reset_attempts(drive_root, device_id)
+
+    print_success("PIN réinitialisé avec succès !")
+    typewriter("Vos nouveaux PIN sont actifs immédiatement.", color=Fore.GREEN)
+    return True
+
+
 # ── Statut ────────────────────────────────────────────────────────────────────
 
 def get_usb_status(drive_root: str) -> dict | None:

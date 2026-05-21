@@ -151,6 +151,7 @@ def display_help():
   python main.py --encrypt <dossier>   Chiffre tous les fichiers du dossier
   python main.py --decrypt <dossier>   Déchiffre tous les fichiers du dossier
   python main.py --status              Affiche l'état de la clé USB connectée
+  python main.py --reset-pin           Réinitialise le PIN principal et le PIN de détresse
   python main.py --help                Affiche cette aide
 
 {Fore.YELLOW}AUTHENTIFICATION :{Style.RESET_ALL}

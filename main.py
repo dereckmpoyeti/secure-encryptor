@@ -6,7 +6,7 @@ Usage :
   python main.py --encrypt <dossier>
   python main.py --decrypt <dossier>
   python main.py --status
-  python main.py --reset-password
+  python main.py --reset-pin
   python main.py --help
 """
 
@@ -17,7 +17,7 @@ from colorama import Fore
 
 from display import print_banner, print_error, print_warning, display_stats, display_usb_status, display_help
 from processor import process_folder, fake_process_folder, validate_folder_path
-from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status
+from usb import select_usb_drive, is_usb_initialized, initialize_usb, unlock_usb_key, get_usb_status, reset_pin
 from vault import cleanup_orphan_tmp, usb_logs_path
 
 
@@ -33,7 +33,7 @@ Exemples :
   python main.py --encrypt /mon/dossier
   python main.py --decrypt /mon/dossier
   python main.py --status
-  python main.py --reset-password
+  python main.py --reset-pin
 """,
         add_help=False,
     )
@@ -50,6 +50,10 @@ Exemples :
     group.add_argument(
         "--status", action="store_true",
         help="Affiche l'état de la clé USB connectée.",
+    )
+    group.add_argument(
+        "--reset-pin", action="store_true",
+        help="Réinitialise le PIN principal et le PIN de détresse.",
     )
     group.add_argument(
         "--help", "-h", action="store_true",
@@ -166,6 +170,27 @@ def cmd_status():
 
 
 
+def cmd_reset_pin():
+    print_warning("\nBranchez la clé USB et appuyez sur Entrée.")
+    try:
+        input()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit(0)
+
+    drive = select_usb_drive()
+    if not drive:
+        sys.exit(1)
+
+    if not is_usb_initialized(drive):
+        print_error("Cette USB n'est pas configurée.")
+        sys.exit(1)
+
+    success = reset_pin(drive)
+    if not success:
+        sys.exit(1)
+
+
 # ── Point d'entrée ────────────────────────────────────────────────────────────
 
 def main():
@@ -189,6 +214,9 @@ def main():
 
         elif args.status:
             cmd_status()
+
+        elif args.reset_pin:
+            cmd_reset_pin()
 
 
     except KeyboardInterrupt:
